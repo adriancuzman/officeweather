@@ -3,8 +3,7 @@
 # based on code by henryk ploetz
 # https://hackaday.io/project/5301-reverse-engineering-a-low-cost-usb-co-monitor/log/17909-all-your-base-are-belong-to-us
 
-import sys, fcntl, time, rrdtool, os, argparse, socket
-from rrdtool import update as rrd_update
+import sys, fcntl, time, os, argparse, socket, datetime
 
 RRDDB_LOC = "/var/local/monitor/co2-temp.rrd"
 GRAPHOUT_DIR = "/var/www/html/images"
@@ -41,53 +40,8 @@ def hd(d):
 def now():
     return int(time.time())
 
-def graphout(period):
-    filename = GRAPHOUT_DIR + "/co2-" + period + "-graph.png" 
-    rrdtool.graph(filename,
-        "--start", "now-"+period, "--end", "now",
-        "--title", "CO2",
-        "--vertical-label", "CO2 PPM",
-        "--width", "600",
-        "-h 200",
-        "-l 0",
-        "DEF:co2_num="+RRDDB_LOC+":CO2:AVERAGE",
-        "LINE1:co2_num#0000FF:CO2",
-        "GPRINT:co2_num:LAST: Last\\:%8.2lf %s ",
-        "GPRINT:co2_num:MIN: Min\\:%8.2lf %s ",
-        "GPRINT:co2_num:AVERAGE: Avg\\:%8.2lf %s ",
-        "GPRINT:co2_num:MAX: Max\\:%8.2lf %s\\n",
-        "HRULE:500#16F50F:OK",
-        "COMMENT: \\n",
-        "HRULE:800#FF952B:DEV-WARN",
-        "COMMENT: \\n",
-        "HRULE:1000#3FC0EB:OFF-WARN",
-        "COMMENT: \\n",
-        "HRULE:1200#DE2C2F:CRIT")
-
-    filename = GRAPHOUT_DIR + "/temp-" + period + "-graph.png" 
-    rrdtool.graph(filename,
-        "--start", "now-"+period, "--end", "now",
-        "--title", "TEMP",
-        "--vertical-label", "TEMP C",
-        "--width", "600",
-        "-h 200",
-        "DEF:temp_num="+RRDDB_LOC+":TEMP:AVERAGE",
-        "LINE1:temp_num#00FF00:TEMP",
-        "GPRINT:temp_num:LAST: Last\\:%8.2lf %s ",
-        "GPRINT:temp_num:MIN: Min\\:%8.2lf %s ",
-        "GPRINT:temp_num:AVERAGE: Avg\\:%8.2lf %s ",
-        "GPRINT:temp_num:MAX: Max\\:%8.2lf %s \\n")
-
 if __name__ == "__main__":
-    # use lock on socket to indicate that script is already running
-    try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        ## Create an abstract socket, by prefixing it with null.
-        s.bind('\0postconnect_gateway_notify_lock')
-    except socket.error, e:
-        # if script is already running just exit silently
-        sys.exit(0)
-            
+
     key = [0xc4, 0xc6, 0xc0, 0x92, 0x40, 0x23, 0xdc, 0x96]    
     fp = open(sys.argv[1], "a+b",  0)
     HIDIOCSFEATURE_9 = 0xC0094806
@@ -105,31 +59,7 @@ if __name__ == "__main__":
     values = {}
     stamp = now()
 
-    if not os.path.isfile(RRDDB_LOC):
-        print "RRD database not found, generating it .."
-
-        # updated every 5 minutes (--step 300)
-        # two datasources which can hold unlimit values min and max
-        # saves 1 day in 5-minute resolution (288 * (300*1/60) / 60/24)
-        # saves 1 week in in 15-minute resolution (672 * (300*3/60) / 60/24)
-        # saves 1 month in 1-hour resolution (744 * (300*12/60) / 60/24)
-        # saves 7 years in 1-hour resolution
-        rddbh = rrdtool.create(RRDDB_LOC, "--step", "300", "--start", '0',
-            "DS:CO2:GAUGE:600:U:U",
-            "DS:TEMP:GAUGE:600:U:U",
-            "RRA:AVERAGE:0.5:1:288",
-            "RRA:AVERAGE:0.5:3:672",
-            "RRA:AVERAGE:0.5:12:744",
-            "RRA:AVERAGE:0.5:12:61320",
-            "RRA:MIN:0.5:1:288",
-            "RRA:MIN:0.5:3:672",
-            "RRA:MIN:0.5:12:744",
-            "RRA:MIN:0.5:12:61320",
-            "RRA:MAX:0.5:1:288",
-            "RRA:MAX:0.5:3:672",
-            "RRA:MAX:0.5:12:744",
-            "RRA:MAX:0.5:12:61320")
-
+    print "hour, min, co2, temp"
     while True:
         data = list(ord(e) for e in fp.read(8))
         decrypted = decrypt(key, data)
@@ -143,16 +73,8 @@ if __name__ == "__main__":
             if (0x50 in values) and (0x42 in values):
                 co2 = values[0x50]
                 tmp = (values[0x42]/16.0-273.15)
-
-                sys.stdout.write("CO2: %4i TMP: %3.1f    \r" % (co2, tmp))
+                timeNow = datetime.datetime.now()
+                sys.stdout.write("%d,%d,%4i,%3.1f\n" % (timeNow.hour, timeNow.minute, co2, tmp))
                 sys.stdout.flush()
+                time.sleep(60)
             
-                if now() - stamp > 60:
-                    print ">>> sending dataset CO2: %4i TMP: %3.1f .." % (co2, tmp)
-                    rrd_update(RRDDB_LOC, 'N:%s:%s' % (co2, tmp))
-                    graphout("8h")
-                    graphout("24h")
-                    graphout("7d")
-                    graphout("1m")
-                    graphout("1y")
-                    stamp = now()
